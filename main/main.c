@@ -13,6 +13,7 @@
 #include "esp_utils.h"
 #include "ssd1306.h"
 #include "lora.h"
+#include "mqtt_service.h"
 
 /* ================== GLOBALS ================== */
 

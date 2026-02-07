@@ -1,10 +1,8 @@
 idf_component_register(
     SRCS
-        "main.c"
+        "mqtt_service.c"
     INCLUDE_DIRS
         "."
     REQUIRES
-        lora
-        ssd1306
-        mqtt_service
+        mqtt
 )
