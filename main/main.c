@@ -74,6 +74,9 @@ void app_main(void)
 
     vTaskDelay(pdMS_TO_TICKS(500));
 
+    //wifi_init();          // must be up first
+    mqtt_service_start();
+
     /* ---------- SX127X RESET ---------- */
     sx127x_util_reset();
 
