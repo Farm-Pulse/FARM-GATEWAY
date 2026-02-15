@@ -5,6 +5,9 @@ idf_component_register(
         "."
     REQUIRES
         lora
+        driver
         ssd1306
         mqtt_service
+        nvs_flash
+        esp_timer
 )
