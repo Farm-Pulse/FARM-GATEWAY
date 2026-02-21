@@ -30,6 +30,31 @@ typedef enum {
 #define FCF_MASK_ACK_REQ    0x10
 #define FCF_MASK_TYPE       0x0F
 
+
+// --- Command IDs (Payload[0] for PKT_TYPE_CMD) ---
+typedef enum {
+    CMD_MOTOR_OFF = 0x00,
+    CMD_MOTOR_ON  = 0x01,
+    CMD_RESET     = 0xFF
+} command_id_t;
+
+// --- 3-Phase Sensor Data Structure (20 Bytes) ---
+// We use 'packed' to send this struct directly over LoRa
+#pragma pack(push, 1)
+typedef struct {
+    uint16_t voltage_R;  // Volts (e.g., 230)
+    uint16_t voltage_Y;
+    uint16_t voltage_B;
+    uint16_t current_R;  // Amps * 10 (e.g., 15 -> 1.5A)
+    uint16_t current_Y;
+    uint16_t current_B;
+    uint32_t power_active; // Watts
+    uint16_t frequency;    // Hz * 10 (e.g., 500 -> 50.0Hz)
+    uint8_t  motor_status; // 1=ON, 0=OFF
+    uint8_t  reserved;
+} sensor_data_t;
+
+
 // --- The Fixed 10-Byte Header ---
 // [EmSave Reference source: 100-138] adapted for LoRa
 #pragma pack(push, 1) // Ensure no padding bytes!
