@@ -11,13 +11,25 @@
 
 static const char *TAG = "GATEWAY_MAIN";
 
-#define MY_NODE_ID       CONFIG_FARMPULSE_NODE_ID // Should be 0
+#define MY_NODE_ID       CONFIG_FARMPULSE_NODE_ID // 0
 
 static uint8_t motor_state = 0; 
+
+// --- EMSAVE ALIVE TABLE ---
+// Tracks the status of up to 256 possible nodes in the network
+static bool alive_table[256] = {false};
 
 void app_packet_handler(uint8_t src_id, uint8_t type, uint8_t *data, uint8_t len) {
     if (type == PKT_TYPE_DATA && len == sizeof(sensor_data_t)) {
         sensor_data_t *s = (sensor_data_t *)data;
+        
+        // --- ALIVE TABLE LOGIC ---
+        // If we receive data from a node, mark it as Alive!
+        if (!alive_table[src_id]) {
+            ESP_LOGW(TAG, ">>> NODE %d ADDED TO ALIVE TABLE <<<", src_id);
+            alive_table[src_id] = true;
+        }
+
         ESP_LOGI(TAG, "--- 3-PHASE DATA FROM NODE %d ---", src_id);
         ESP_LOGI(TAG, "   Voltage: R=%d V, Y=%d V, B=%d V", s->voltage_R, s->voltage_Y, s->voltage_B);
         ESP_LOGI(TAG, "   Current: R=%d A, Y=%d A, B=%d A (x10)", s->current_R, s->current_Y, s->current_B);
@@ -33,12 +45,37 @@ void application_task(void *arg) {
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(10000)); // 10 Second loop
 
-        // Gateway alternating logic: Command vs Heartbeat
         if (counter % 4 == 0) {
             uint8_t cmd = (motor_state == 0) ? CMD_MOTOR_ON : CMD_MOTOR_OFF;
             motor_state = !motor_state; 
-            ESP_LOGI(TAG, "Sending CMD_MOTOR_%s to Node 1", cmd ? "ON" : "OFF");
-            network_send(1, PKT_TYPE_CMD, &cmd, 1);
+            
+            bool command_sent = false;
+            for (int i = 1; i < 256; i++) {
+                if (alive_table[i]) {
+                    ESP_LOGI(TAG, "Sending CMD_MOTOR_%s to Node %d", cmd ? "ON" : "OFF", i);
+                    
+                    // Send the command and capture the result
+                    bool success = network_send(i, PKT_TYPE_CMD, &cmd, 1);
+                    
+                    if (success) {
+                        ESP_LOGI(TAG, "Command delivered to Node %d successfully.", i);
+                    } else {
+                        // --- NEW: EMSAVE DECLARE DEAD LOGIC ---
+                        ESP_LOGE(TAG, "!!! COMM ERROR !!! Failed to reach Node %d.", i);
+                        ESP_LOGE(TAG, ">>> DECLARING NODE %d DEAD <<<", i);
+                        
+                        // Remove from Alive Table so we don't keep spamming it
+                        alive_table[i] = false; 
+                    }
+                    
+                    command_sent = true;
+                    vTaskDelay(pdMS_TO_TICKS(500)); 
+                }
+            }
+
+            if (!command_sent) {
+                ESP_LOGW(TAG, "No nodes in Alive Table to send command to.");
+            }
         } 
         else {
             ESP_LOGI(TAG, "Sending Discovery Broadcast...");
