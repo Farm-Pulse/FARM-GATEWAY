@@ -22,6 +22,8 @@ static const char *TAG = "gateway_main";
 SSD1306_t oled;
 sx127x device;
 
+
+
 /* ================== OLED TASK ================== */
 
 static void oled_task(void *arg)
