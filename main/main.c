@@ -73,8 +73,7 @@ void app_main(void)
         nvs_flash_erase();
         nvs_flash_init();
     }
-
-    
+        
     mqtt_system_start();
 
     /* ---------- OLED INIT ---------- */

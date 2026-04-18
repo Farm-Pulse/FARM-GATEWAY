@@ -1,5 +1,6 @@
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 #include "mqtt.h"
 
@@ -18,21 +19,338 @@
 #define WIFI_SSID       "Airtel_Ajay"
 #define WIFI_PASSWORD   "Ajay@6952"
 
-#define MQTT_BROKER_URI "mqtts://d115eaabb2c14526a27e587637759f52.s1.eu.hivemq.cloud:8883"
+#define MQTT_BROKER_URI "mqtts://a37f344630334685ad06ea955597f845.s1.eu.hivemq.cloud"
 
-#define MQTT_USERNAME   "praful"
-#define MQTT_PASSWORD   "Praful@123"
-#define MQTT_CLIENT_ID  "san_node01"
+#define MQTT_USERNAME   "Prafull"
+#define MQTT_PASSWORD   "Praful1234"
+#define MQTT_CLIENT_ID  "gateway01"
 
-#define SUBSCRIBE_TOPIC "farmpulse/gateway1/node01/command"
-#define PUBLISH_TOPIC   "farmpulse/gateway1/node01/sensor"
+#define EXPECTED_PASSWORD   "AB1234"
+#define EXPECTED_GID        "MH-AMT-01"
+
+#define SUBSCRIBE_TOPIC "server/MH-AMT-01"
+
+char topic[100] = "gateway/MH-AMT-01";
 
 /* ======================================================= */
 
-static const char *TAG = "MQTT_APP";
+static const char *TAG = "LORA_MQTT_GATEWAY";
 
 static esp_mqtt_client_handle_t mqtt_client = NULL;
 static bool mqtt_connected = false;
+
+typedef struct
+{
+    char frame_version[5];
+    char password[10];
+    char gid[20];
+    int  nid;
+    int  function_code;
+    int  action_code;
+    char data[200];   // GENERIC PAYLOAD
+
+} sensor_frame_t;
+
+bool validate_mqtt_frame(char *input, sensor_frame_t *frame)
+{
+    int len = strlen(input);
+
+    // 1. Check start and end delimiter
+    if (len < 5 || input[0] != '#' || input[len - 1] != '$')
+    {
+        printf("Invalid frame format (# or $ missing)\n");
+        return false;
+    }
+
+    // 2. Copy to temp buffer (strtok modifies string)
+    char temp[300];
+    strcpy(temp, input);
+
+    // Remove '#' and '$'
+    memmove(temp, temp + 1, strlen(temp));
+    char *end = strchr(temp, '$');
+    if (end) *end = '\0';
+
+    // 3. Extract tokens
+    char *token;
+
+    token = strtok(temp, " ");
+    if (!token) return false;
+    strcpy(frame->frame_version, token);
+
+    token = strtok(NULL, " ");
+    if (!token) return false;
+    strcpy(frame->password, token);
+
+    token = strtok(NULL, " ");
+    if (!token) return false;
+    strcpy(frame->gid, token);
+
+    token = strtok(NULL, " ");
+    if (!token) return false;
+    frame->nid = atoi(token);
+
+    token = strtok(NULL, " ");
+    if (!token) return false;
+    frame->function_code = atoi(token);
+
+    token = strtok(NULL, " ");
+    if (!token) return false;
+    frame->action_code = atoi(token);
+
+    token = strtok(NULL, "");
+    if (!token) return false;
+    strcpy(frame->data, token);
+
+    // 4. Validate password
+    if (strcmp(frame->password, EXPECTED_PASSWORD) != 0)
+    {
+        printf("Invalid Password\n");
+        return false;
+    }
+
+    // 5. Validate GID
+    if (strcmp(frame->gid, EXPECTED_GID) != 0)
+    {
+        printf("Invalid GID\n");
+        return false;
+    }
+
+    return true;
+}
+
+/* ===================== SIMULATE LORA DATA ===================== */
+
+void simulate_lora_receive(char *buffer)
+{
+    int node = (rand() % 3) + 1;
+
+    char nid[5];
+    sprintf(nid,"N%02d",node);
+
+    float temp = 25 + (rand()%10);
+    int hum = 40 + (rand()%30);
+    int soil = 20 + (rand()%40);
+    int volt = 220 + (rand()%10);
+    float batt = 3.5 + ((float)(rand()%10)/10);
+
+    sprintf(buffer,
+    "#01 AB1234 MH-AMT-01 %s 02 01 20260316120000 %.1f %d %d %d %.1f$",
+    nid,temp,hum,soil,volt,batt);
+}
+
+
+/* ===================== PARSE LORA FRAME ===================== */
+
+void parse_lora_frame(char *input, sensor_frame_t *frame)
+{
+    char temp[300];
+    strcpy(temp, input);   // strtok modifies string
+
+    char *token;
+
+    // Remove starting '#'
+    if (temp[0] == '#')
+        memmove(temp, temp + 1, strlen(temp));
+
+    // Remove ending '$'
+    char *end = strchr(temp, '$');
+    if (end) *end = '\0';
+
+    token = strtok(temp, " ");
+    if (token) strcpy(frame->frame_version, token);
+
+    token = strtok(NULL, " ");
+    if (token) strcpy(frame->password, token);
+
+    token = strtok(NULL, " ");
+    if (token) strcpy(frame->gid, token);
+
+    token = strtok(NULL, " ");
+    if (token) frame->nid = atoi(token);
+
+    token = strtok(NULL, " ");
+    if (token) frame->function_code = atoi(token);
+
+    token = strtok(NULL, " ");
+    if (token) frame->action_code = atoi(token);
+
+    token = strtok(NULL, " ");
+    if (token) strcpy(frame->data, token);
+}
+
+
+/* ===================== BUILD MQTT FRAME ===================== */
+
+
+
+void build_mqtt_frame(sensor_frame_t *frame, char *payload)
+{
+    sprintf(payload,
+            "#%s %s %s %d %d %d %s $",
+            frame->frame_version,
+            frame->password,
+            frame->gid,
+            frame->nid,
+            frame->function_code,
+            frame->action_code,
+            frame->data);
+}
+
+
+/* ===================== MQTT PUBLISH TASK ===================== */
+
+static void mqtt_publish_task(void *arg)
+{
+    while (1)
+    {
+        if (mqtt_connected && mqtt_client)
+        {
+            char lora_data[200];
+
+            /* Simulate LoRa packet */
+            simulate_lora_receive(lora_data);
+
+           // ESP_LOGI(TAG,"LoRa RX: %s",lora_data);
+
+            sensor_frame_t frame;
+
+            parse_lora_frame(lora_data, &frame);
+
+            char mqtt_payload[200];
+
+            build_mqtt_frame(&frame, mqtt_payload);
+
+            char topic[100];
+
+            sprintf(topic,
+                    "gateway/MH-AMT-01"
+                    );//frame.gid
+            
+            int msg_id = esp_mqtt_client_publish(
+                mqtt_client,
+                topic,
+                mqtt_payload,
+                0,
+                1,
+                0);
+
+            ESP_LOGI(TAG,"MQTT Topic: %s",topic);
+            ESP_LOGI(TAG,"MQTT Payload: %s",mqtt_payload);
+            ESP_LOGI(TAG,"msg_id=%d",msg_id);
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(5000));
+    }
+}
+
+
+/* ===================== MQTT EVENT HANDLER ===================== */
+
+static void mqtt_event_handler(void *arg,
+                               esp_event_base_t event_base,
+                               int32_t event_id,
+                               void *event_data)
+{
+    esp_mqtt_event_handle_t event = event_data;
+
+    switch (event_id)
+    {
+
+    case MQTT_EVENT_CONNECTED:
+
+        ESP_LOGI(TAG,"MQTT CONNECTED");
+
+        mqtt_connected = true;
+        mqtt_client = event->client;
+
+        esp_mqtt_client_subscribe(
+            mqtt_client,
+            SUBSCRIBE_TOPIC,
+            1);
+
+        xTaskCreate(
+            mqtt_publish_task,
+            "mqtt_publish",
+            4096,
+            NULL,
+            5,
+            NULL);
+
+        break;
+
+
+    case MQTT_EVENT_DATA:
+    {
+        ESP_LOGI(TAG, "MQTT DATA RECEIVED");
+
+        char rx_data[300];
+
+        // Copy payload safely
+        snprintf(rx_data, sizeof(rx_data), "%.*s",
+                event->data_len,
+                event->data);
+
+        printf("Received: %s\n", rx_data);
+
+        sensor_frame_t frame;
+
+        if (validate_mqtt_frame(rx_data, &frame))
+        {
+            ESP_LOGI(TAG, "Frame VALID");
+
+            printf("Version: %s\n", frame.frame_version);
+            printf("GID: %s\n", frame.gid);
+            printf("Data: %s\n", frame.data);
+            if(frame.nid == 0)
+            {
+                printf("Node ID: Broadcast\n");
+            }
+            else if(frame.nid >= 1)
+            {   char ack_payload[200];
+                sprintf(ack_payload,
+                "#1 AB1234 MH-AMT-XX 1 10 3 1 0 $"
+                );
+                printf("Node ID: %d\n", frame.nid);
+                if(frame.function_code == 10)
+                {
+                  int msg_id = esp_mqtt_client_publish(
+                mqtt_client,
+                topic,
+                ack_payload,
+                0,
+                1,
+                0);  
+                }
+            }
+            else 
+            {
+                printf("invalid node id\n");
+            }
+
+        }
+        else
+        {
+            ESP_LOGE(TAG, "Frame INVALID - Ignored");
+        }
+
+        break;
+    }
+
+
+    case MQTT_EVENT_DISCONNECTED:
+
+        ESP_LOGW(TAG,"MQTT DISCONNECTED");
+
+        mqtt_connected = false;
+
+        break;
+
+    default:
+        break;
+    }
+}
+
 
 /* ===================== ROOT CA ===================== */
 
@@ -69,98 +387,6 @@ static const char root_ca_pem[] =
 "emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=\n"
 "-----END CERTIFICATE-----\n";
 
-/* ===================== MQTT PUBLISH TASK ===================== */
-
-static void mqtt_publish_task(void *arg)
-{
-    while (1)
-    {
-        if (mqtt_connected && mqtt_client)
-        {
-            const char *payload =
-            "{\"temperature\":29.5,\"humidity\":58,\"soil\":444}";
-
-            int msg_id = esp_mqtt_client_publish(
-                mqtt_client,
-                PUBLISH_TOPIC,
-                payload,
-                0,
-                1,
-                0);
-
-            ESP_LOGI(TAG, "Published msg_id=%d", msg_id);
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(5000));
-    }
-}
-
-/* ===================== MQTT EVENT HANDLER ===================== */
-
-static void mqtt_event_handler(void *arg,
-                               esp_event_base_t event_base,
-                               int32_t event_id,
-                               void *event_data)
-{
-    esp_mqtt_event_handle_t event = event_data;
-
-    switch (event_id)
-    {
-
-    case MQTT_EVENT_CONNECTED:
-
-        ESP_LOGI(TAG, "MQTT CONNECTED");
-
-        mqtt_connected = true;
-        mqtt_client = event->client;
-
-        esp_mqtt_client_subscribe(
-            mqtt_client,
-            SUBSCRIBE_TOPIC,
-            1);
-
-        ESP_LOGI(TAG, "Subscribed to: %s", SUBSCRIBE_TOPIC);
-
-        xTaskCreate(
-            mqtt_publish_task,
-            "mqtt_pub",
-            4096,
-            NULL,
-            5,
-            NULL);
-
-        break;
-
-
-    case MQTT_EVENT_DATA:
-
-        ESP_LOGI(TAG, "Message Received");
-
-        printf("Topic: %.*s\n",
-               event->topic_len,
-               event->topic);
-
-        printf("Data : %.*s\n",
-               event->data_len,
-               event->data);
-
-        printf("------------\n");
-
-        break;
-
-
-    case MQTT_EVENT_DISCONNECTED:
-
-        ESP_LOGW(TAG, "MQTT DISCONNECTED");
-
-        mqtt_connected = false;
-
-        break;
-
-    default:
-        break;
-    }
-}
 
 /* ===================== MQTT START ===================== */
 
@@ -188,6 +414,7 @@ static void mqtt_start(void)
     esp_mqtt_client_start(mqtt_client);
 }
 
+
 /* ===================== WIFI EVENT HANDLER ===================== */
 
 static void wifi_event_handler(void *arg,
@@ -204,17 +431,18 @@ static void wifi_event_handler(void *arg,
     else if (event_base == WIFI_EVENT &&
              event_id == WIFI_EVENT_STA_DISCONNECTED)
     {
-        ESP_LOGW(TAG, "WiFi disconnected... retrying");
+        ESP_LOGW(TAG,"WiFi disconnected...retrying");
         esp_wifi_connect();
     }
 
     else if (event_base == IP_EVENT &&
              event_id == IP_EVENT_STA_GOT_IP)
     {
-        ESP_LOGI(TAG, "WiFi Connected. Starting MQTT...");
+        ESP_LOGI(TAG,"WiFi Connected");
         mqtt_start();
     }
 }
+
 
 /* ===================== WIFI INIT ===================== */
 
@@ -252,6 +480,7 @@ static void wifi_init(void)
     esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
     esp_wifi_start();
 }
+
 
 /* ===================== SYSTEM START ===================== */
 
