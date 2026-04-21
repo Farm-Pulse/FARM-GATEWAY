@@ -13,7 +13,8 @@
 #include "esp_utils.h"
 #include "ssd1306.h"
 #include "lora.h"
-#include "mqtt_service.h"
+#include "mqtt.h"
+#include "nvs_flash.h"
 
 /* ================== GLOBALS ================== */
 
@@ -64,6 +65,16 @@ static void oled_task(void *arg)
 void app_main(void)
 {
     ESP_LOGI(TAG, "Starting Farm-Gateway");
+    esp_err_t ret = nvs_flash_init();
+
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES ||
+        ret == ESP_ERR_NVS_NEW_VERSION_FOUND)
+    {
+        nvs_flash_erase();
+        nvs_flash_init();
+    }
+        
+    mqtt_system_start();
 
     /* ---------- OLED INIT ---------- */
     i2c_master_init(&oled, GPIO_NUM_18, GPIO_NUM_17, -1);
@@ -73,9 +84,6 @@ void app_main(void)
     ssd1306_display_text(&oled, 0, "LoRa RX Ready", 13, false);
 
     vTaskDelay(pdMS_TO_TICKS(500));
-
-    //wifi_init();          // must be up first
-    mqtt_service_start();
 
     /* ---------- SX127X RESET ---------- */
     sx127x_util_reset();
