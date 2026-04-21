@@ -1,6 +1,6 @@
 /**
- * @file MAC-layer.h
- * @brief MAC (Media Access Configuration) Layer Implementation - Base Level RF Format Packet
+ * @file mac_layer.h
+ * @brief Handles raw SPI communication with the SX1276 LoRa chip and Interrupts.
  * @author Shahid  
  * @date Feb 2026
  */
