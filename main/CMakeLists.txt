@@ -1,13 +1,14 @@
 idf_component_register(
-    SRCS
-        "main.c"
-    INCLUDE_DIRS
-        "."
+    SRCS "main.c"
+    INCLUDE_DIRS "."
     REQUIRES
-        lora
-        driver
-        ssd1306
-        mqtt_service
+        esp_wifi
+        esp_event
+        esp_netif
         nvs_flash
-        esp_timer
+        mqtt
+        mqtt_service
+        lora
+        sx127x
+        ssd1306
 )
