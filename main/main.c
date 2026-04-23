@@ -8,6 +8,7 @@
 #include "mac_layer.h"
 #include "network_layer.h"
 #include "farmpulse_defs.h"
+#include "mqtt.h"
 
 static const char *TAG = "GATEWAY_MAIN";
 
@@ -101,6 +102,7 @@ void app_main(void) {
     mac_init();     
     network_init(); 
     network_register_cb(app_packet_handler);
+    mqtt_system_start();
     
     xTaskCreate(application_task, "app_task", 4096, NULL, 5, NULL);
 }
