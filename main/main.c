@@ -8,12 +8,6 @@
 #include "mac_layer.h"
 #include "network_layer.h"
 #include "farmpulse_defs.h"
-#include "sx127x.h"
-#include "esp_utils.h"
-#include "ssd1306.h"
-#include "lora.h"
-#include "mqtt.h"
-#include "nvs_flash.h"
 
 static const char *TAG = "GATEWAY_MAIN";
 
@@ -92,81 +86,21 @@ void application_task(void *arg) {
     }
 }
 
-/* ================== APP MAIN ================== */
-
-void app_main(void)
-{
-    ESP_LOGI(TAG, "Starting Farm-Gateway");
+// FarmGateway main application
+void app_main(void) {
     esp_err_t ret = nvs_flash_init();
-
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES ||
-        ret == ESP_ERR_NVS_NEW_VERSION_FOUND)
-    {
-        nvs_flash_erase();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
         nvs_flash_init();
     }
-        
-    mqtt_system_start();
-
-    /* ---------- OLED INIT ---------- */
-    i2c_master_init(&oled, GPIO_NUM_18, GPIO_NUM_17, -1);
-    ssd1306_init(&oled, 128, 64);
-    ssd1306_clear_screen(&oled, false);
-    ssd1306_contrast(&oled, 0xFF);
-    ssd1306_display_text(&oled, 0, "LoRa RX Ready", 13, false);
-
-    vTaskDelay(pdMS_TO_TICKS(500));
-
-    /* ---------- SX127X RESET ---------- */
-    sx127x_util_reset();
-
-    /* ---------- SPI INIT ---------- */
-    spi_device_handle_t spi_device;
-    sx127x_init_spi(&spi_device);
-
-    /* ---------- RADIO INIT ---------- */
-    ESP_ERROR_CHECK(sx127x_create(spi_device, &device));
-    ESP_ERROR_CHECK(sx127x_set_opmod(
-        SX127X_MODE_STANDBY,
-        SX127X_MODULATION_LORA,
-        &device));
-
-    ESP_ERROR_CHECK(sx127x_set_frequency(TEST_FREQUENCY, &device));
-    ESP_ERROR_CHECK(sx127x_lora_reset_fifo(&device));
-
-    ESP_ERROR_CHECK(sx127x_rx_set_lna_boost_hf(true, &device));
-    ESP_ERROR_CHECK(sx127x_rx_set_lna_gain(SX127X_LNA_GAIN_G4, &device));
-    ESP_ERROR_CHECK(sx127x_lora_set_bandwidth(SX127X_BW_125000, &device));
-    ESP_ERROR_CHECK(sx127x_lora_set_implicit_header(NULL, &device));
-    ESP_ERROR_CHECK(sx127x_lora_set_spreading_factor(SX127X_SF_9, &device));
-    ESP_ERROR_CHECK(sx127x_lora_set_syncword(0x12, &device));
-    ESP_ERROR_CHECK(sx127x_set_preamble_length(8, &device));
-
-    /* ---------- LORA MODULE INIT ---------- */
-    lora_init(&device);
-
-    /* ---------- INTERRUPT TASK (LIBRARY) ---------- */
-    ESP_ERROR_CHECK(setup_task(&device));
-
-    gpio_install_isr_service(0);
-    setup_gpio_interrupts(
-        (gpio_num_t)DIO0,
-        &device,
-        GPIO_INTR_POSEDGE);
-
-    /* ---------- OLED TASK ---------- */
-    xTaskCreatePinnedToCore(
-        oled_task,
-        "oled_task",
-        4096,
-        NULL,
-        1,
-        NULL,
-        xPortGetCoreID());
 
     ESP_LOGI(TAG, "==========================================");
     ESP_LOGI(TAG, "   FARMPULSE GATEWAY - Node ID: %d", MY_NODE_ID);
     ESP_LOGI(TAG, "==========================================");
 
-    ESP_LOGI(TAG, "LoRa RX continuous mode started");
+    mac_init();     
+    network_init(); 
+    network_register_cb(app_packet_handler);
+    
+    xTaskCreate(application_task, "app_task", 4096, NULL, 5, NULL);
 }
