@@ -20,17 +20,6 @@ typedef enum {
     PKT_TYPE_FAULT      = 0x09  // Jamming / Sensor Failure
 } packet_type_t;
 
-// --- Frame Control Flags ---
-// Bit 7-6: EHO (Extended Header)
-// Bit 5:   Encryption
-// Bit 4:   Ack Request
-// Bit 3-0: Packet Type
-#define FCF_MASK_EHO        0xC0
-#define FCF_MASK_ENC        0x20
-#define FCF_MASK_ACK_REQ    0x10
-#define FCF_MASK_TYPE       0x0F
-
-
 // --- Command IDs (Payload[0] for PKT_TYPE_CMD) ---
 typedef enum {
     CMD_MOTOR_OFF = 0x00,
@@ -53,7 +42,17 @@ typedef struct {
     uint8_t  motor_status; // 1=ON, 0=OFF
     uint8_t  reserved;
 } sensor_data_t;
+#pragma pack(pop)
 
+// --- Frame Control Flags ---
+// Bit 7-6: EHO (Extended Header)
+// Bit 5:   Encryption
+// Bit 4:   Ack Requestidf.py
+// Bit 3-0: Packet Type
+#define FCF_MASK_EHO        0xC0
+#define FCF_MASK_ENC        0x20
+#define FCF_MASK_ACK_REQ    0x10
+#define FCF_MASK_TYPE       0x0F
 
 // --- The Fixed 10-Byte Header ---
 // [EmSave Reference source: 100-138] adapted for LoRa
@@ -75,9 +74,11 @@ typedef struct {
 #define MAX_PAYLOAD_SIZE 200
 
 // Full Packet Structure
+#pragma pack(push, 1)
 typedef struct {
     farm_header_t header;
     uint8_t       payload[MAX_PAYLOAD_SIZE];
 } farm_packet_t;
+#pragma pack(pop)
 
 #endif // FARMPULSE_DEFS_H
