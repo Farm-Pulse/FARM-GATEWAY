@@ -12,13 +12,13 @@
 #include "esp_log.h"
 #include "esp_netif.h"
 
-#include "farmpulse_defs.h"
 #include "mqtt_client.h"
+#include "farmpulse_defs.h"
 
 /* ===================== USER CONFIG ===================== */
 
-#define WIFI_SSID "Pin drop library3"
-#define WIFI_PASSWORD "pindroplibrary@2025"
+#define WIFI_SSID "realme 5 Pro"
+#define WIFI_PASSWORD "Praful@123"
 
 #define MQTT_BROKER_URI "mqtts://9c7eb09fd9984a90b5c4419a1cbf7472.s1.eu.hivemq.cloud"
 
