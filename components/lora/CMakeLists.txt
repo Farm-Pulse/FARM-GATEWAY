@@ -1,11 +1,14 @@
 idf_component_register(
     SRCS
-        "lora.c"
         "esp_utils.c"
+        "mac_layer.c"
+        "network_layer.c"
     INCLUDE_DIRS
         "."
     REQUIRES
         sx127x
         driver
         ssd1306
+        esp_timer
+        spi_flash
 )
