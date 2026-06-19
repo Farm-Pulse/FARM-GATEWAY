@@ -8,7 +8,7 @@ idf_component_register(
     REQUIRES
         sx127x
         driver
-        ssd1306
         esp_timer
         spi_flash
+        farmpulse_config
 )
