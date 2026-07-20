@@ -10,10 +10,11 @@
 #include "mac_layer.h"
 #include "network_layer.h"
 #include "farmpulse_defs.h"
+#include "farmpulse_config.h"
 #include "mqtt.h"
 
 static const char *TAG = "GATEWAY_MAIN";
-#define MY_NODE_ID 0
+//#define MY_NODE_ID 0
 
 // --- EMSAVE ALIVE TABLE ---
 static bool alive_table[256] = {false};
@@ -128,12 +129,21 @@ void app_main(void) {
         nvs_flash_init();
     }
 
+    // 3. Signature & Identity Check
+    farmpulse_config_init();
+
+    // FORCE GATEWAY IDENTITY: If NVS defaulted to 1, overwrite it to 0.
+    if (system_config.node_id != 0) {
+        ESP_LOGW(TAG, "Incorrect Gateway ID detected in NVS. Forcing to 0...");
+        farmpulse_save_node_id(0);
+    }
+    
     // Initialize the IPC Queues
     web_to_lora_queue = xQueueCreate(10, sizeof(gateway_cmd_t));
     lora_to_web_queue = xQueueCreate(10, 256); // Holds strings up to 256 chars
 
     ESP_LOGI(TAG, "==========================================");
-    ESP_LOGI(TAG, "   FARMPULSE GATEWAY - STARTING...");
+    ESP_LOGI(TAG, "   FARMPULSE GATEWAY [TD: %d] - STARTING...",system_config.node_id);
     ESP_LOGI(TAG, "==========================================");
 
     mac_init();     

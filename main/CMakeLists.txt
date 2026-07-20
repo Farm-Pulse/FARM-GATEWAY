@@ -11,5 +11,4 @@ idf_component_register(
         mqtt_service
         lora
         sx127x
-        ssd1306
 )
