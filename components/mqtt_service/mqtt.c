@@ -42,6 +42,7 @@ static const char *TAG = "MQTT_GATEWAY";
 
 static esp_mqtt_client_handle_t mqtt_client = NULL;
 static bool mqtt_connected = false;
+static TaskHandle_t publish_task_handle = NULL;
 
 typedef struct
 {
@@ -253,9 +254,16 @@ static void mqtt_publish_task(void *arg)
                 ESP_LOGI(TAG, "MQTT Topic: %s", topic);
                 ESP_LOGI(TAG, "MQTT Payload: %s", mqtt_payload);
                 ESP_LOGI(TAG, "msg_id=%d", msg_id);
+                
+                if (frame.function_code == 10) {
+                    char ack_payload[200];
+                    sprintf(ack_payload, "#1 AB1234 MH-AMT-XX 1 10 3 1 0 $");
+                    esp_mqtt_client_publish(mqtt_client, topic, ack_payload, 0, 1, 0);
+                }
             }
         }
-        vTaskDelay(pdMS_TO_TICKS(5000));
+        else
+        vTaskDelay(pdMS_TO_TICKS(5000)); // Only delay if Wi-Fi/MQTT is disconnected so we don't spam CPU
     }
 }
 
@@ -283,14 +291,16 @@ static void mqtt_event_handler(void *arg,
             SUBSCRIBE_TOPIC,
             1);
 
+        // ONLY create the task if it doesn't already exist
+    if (publish_task_handle == NULL) {
         xTaskCreate(
             mqtt_publish_task,
             "mqtt_publish",
             4096,
             NULL,
             5,
-            NULL);
-
+            &publish_task_handle); // Save the handle
+    }
         break;
 
     case MQTT_EVENT_DATA:
