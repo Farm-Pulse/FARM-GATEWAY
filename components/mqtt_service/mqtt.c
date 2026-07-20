@@ -17,13 +17,13 @@
 
 /* ===================== USER CONFIG ===================== */
 
-#define WIFI_SSID "realme 5 Pro"
-#define WIFI_PASSWORD "Praful@123"
+#define WIFI_SSID "Airtel_Ajay"
+#define WIFI_PASSWORD "Ajay@6952"
 
-#define MQTT_BROKER_URI "mqtts://9c7eb09fd9984a90b5c4419a1cbf7472.s1.eu.hivemq.cloud"
+#define MQTT_BROKER_URI "mqtts://a37f344630334685ad06ea955597f845.s1.eu.hivemq.cloud"
 
-#define MQTT_USERNAME "Parag72"
-#define MQTT_PASSWORD "Parag1357"
+#define MQTT_USERNAME "Prafull"
+#define MQTT_PASSWORD "Praful1234"
 #define MQTT_CLIENT_ID "gateway01"
 
 #define EXPECTED_PASSWORD "AB1234"
