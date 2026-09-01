@@ -131,6 +131,8 @@ void app_main(void) {
 
     // 3. Signature & Identity Check
     farmpulse_config_init();
+    // Force this board to be the Gateway (Node 0)
+    farmpulse_save_node_id(0);
 
     // FORCE GATEWAY IDENTITY: If NVS defaulted to 1, overwrite it to 0.
     if (system_config.node_id != 0) {
