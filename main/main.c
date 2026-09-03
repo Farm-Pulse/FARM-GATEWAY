@@ -11,34 +11,47 @@
 #include "network_layer.h"
 #include "farmpulse_defs.h"
 #include "farmpulse_config.h"
+#include "lora_parser.h"
 #include "mqtt.h"
 
 static const char *TAG = "GATEWAY_MAIN";
 //#define MY_NODE_ID 0
 
 // --- EMSAVE ALIVE TABLE ---
-static bool alive_table[256] = {false};
+bool alive_table[256] = {false};
+static QueueHandle_t web_to_lora_queue; // Holds commands from Cloud
+QueueHandle_t lora_to_web_queue; // Holds formatted strings for Cloud
+uint8_t motor_action = 0;
 
 // --- IPC QUEUES (The Bridge between LoRa and MQTT) ---
-typedef struct {
+typedef struct
+{
     uint8_t target_node_id;
-    uint8_t command_type;
-} gateway_cmd_t;
-
-static QueueHandle_t web_to_lora_queue; // Holds commands from Cloud
-static QueueHandle_t lora_to_web_queue; // Holds formatted strings for Cloud
+    uint8_t msg_type;
+    uint8_t data[MAX_PAYLOAD_SIZE];
+    uint8_t data_len;
+} lora_cmd_t;
 
 // ====================================================================
 // PUBLIC API FOR MQTT.C TO USE
 // ====================================================================
 
 // 1. MQTT Team calls this when a cloud command arrives
-void push_downlink_command_to_lora(int node_id, int action_code) {
-    gateway_cmd_t cmd;
+void push_downlink_command_to_lora(int node_id, int msg_type, uint8_t *data, int data_len) {
+    lora_cmd_t cmd;
+    memset(&cmd, 0, sizeof(cmd));
+
     cmd.target_node_id = (uint8_t)node_id;
-    cmd.command_type = (uint8_t)action_code; // 1 = ON, 0 = OFF (Modify based on your spec)
+    cmd.msg_type = (uint8_t)msg_type;
+    cmd.data_len = (uint8_t)data_len;
+
+    if (data_len > 0 && data_len <= MAX_PAYLOAD_SIZE) {
+        memcpy(cmd.data, data, data_len);
+    }
+
     xQueueSend(web_to_lora_queue, &cmd, 0);
 }
+
 
 // 2. MQTT Team calls this to get real data instead of simulating
 bool get_next_lora_uplink_string(char* buffer) {
@@ -46,75 +59,129 @@ bool get_next_lora_uplink_string(char* buffer) {
     return (xQueueReceive(lora_to_web_queue, buffer, pdMS_TO_TICKS(1000)) == pdTRUE);
 }
 
-// ====================================================================
-// LORA RX HANDLER (UPLINK TO CLOUD)
-// ====================================================================
-
-void app_packet_handler(uint8_t src_id, uint8_t type, uint8_t *data, uint8_t len) {
-    if (type == PKT_TYPE_DATA && len == sizeof(sensor_data_t)) {
-        sensor_data_t *s = (sensor_data_t *)data;
-        
-        // Update Alive Table
-        if (!alive_table[src_id]) {
-            ESP_LOGW(TAG, ">>> NODE %d ADDED TO ALIVE TABLE <<<", src_id);
-            alive_table[src_id] = true;
-        }
-
-        // Format the real data into your teammate's expected string protocol!
-        // Format: #<version> <pwd> <gid> <nid> <func> <action> <data>$
-        char lora_str[256];
-        sprintf(lora_str, "#01 AB1234 MH-AMT-01 %d 02 01 V_RYB:%d,%d,%d I_RYB:%d,%d,%d PWR:%ld MTR:%d$", 
-                src_id, 
-                s->voltage_R, s->voltage_Y, s->voltage_B,
-                s->current_R, s->current_Y, s->current_B,
-                s->power_active, s->motor_status);
-        
-        // Push the formatted string to the MQTT task
-        xQueueSend(lora_to_web_queue, lora_str, pdMS_TO_TICKS(100));
-        
-        ESP_LOGI(TAG, "Data from Node %d pushed to MQTT Queue.", src_id);
-    }
-}
 
 // ====================================================================
 // LORA TX MANAGER (DOWNLINK TO NODES)
 // ====================================================================
 
-void lora_gateway_task(void *arg) {
+void lora_gateway_task(void *arg)
+{
     uint32_t seconds_since_discovery = 0;
-    gateway_cmd_t incoming_cmd;
+    // gateway_cmd_t incoming_cmd;
+    lora_cmd_t incoming_cmd;
 
-    while (1) {
-        // 1. Check for commands from the Cloud/MQTT
-        if (xQueueReceive(web_to_lora_queue, &incoming_cmd, pdMS_TO_TICKS(1000)) == pdTRUE) {
-            
-            ESP_LOGW(TAG, ">>> WEB COMMAND RECEIVED for Node %d <<<", incoming_cmd.target_node_id);
+    while (1)
+    {
+        /* =====================================================
+         * 1. Check for commands from Cloud / MQTT
+         * ===================================================== */
 
-            // Check if the Node is alive before transmitting
-            if (alive_table[incoming_cmd.target_node_id]) {
-                ESP_LOGI(TAG, "Transmitting Command over LoRa Mesh...");
-                bool success = network_send(incoming_cmd.target_node_id, PKT_TYPE_CMD, &incoming_cmd.command_type, 1);
-                
-                if (!success) {
-                    // DECLARE DEAD LOGIC
-                    ESP_LOGE(TAG, "!!! COMM ERROR !!! Failed to reach Node %d.", incoming_cmd.target_node_id);
-                    alive_table[incoming_cmd.target_node_id] = false; 
+        if (xQueueReceive(
+                web_to_lora_queue,
+                &incoming_cmd,
+                pdMS_TO_TICKS(1000)) == pdTRUE)
+        {
+            ESP_LOGW(
+                TAG,
+                ">>> WEB COMMAND RECEIVED for Node %d <<<", incoming_cmd.target_node_id);
+
+            ESP_LOGI(
+                TAG,
+                "Msg_type: %d, Data_len: %d",
+                incoming_cmd.msg_type,
+                incoming_cmd.data_len);
+
+            /* =================================================
+             * Check if Node is alive
+             * ================================================= */
+
+            if (alive_table[incoming_cmd.target_node_id])
+            {
+                ESP_LOGI(
+                    TAG,
+                    "Node %d is alive",
+                    incoming_cmd.target_node_id);
+
+                bool success = false;
+                /*
+                    * Send payload through
+                    * existing LoRa network layer.
+                    */
+                success = network_send(
+                    incoming_cmd.target_node_id,
+                    incoming_cmd.msg_type,
+                    incoming_cmd.data,
+                    incoming_cmd.data_len);
+
+                /* =================================================
+                 * Transmission Result
+                 * ================================================= */
+
+                // if (incoming_cmd.function_code == 10 &&
+                //     incoming_cmd.action_code == 2 &&
+                //     success == false)
+                if (success == false)
+                {
+                    ESP_LOGE(
+                        TAG,
+                        "!!! COMM ERROR !!! "
+                        "Failed to reach Node %d",
+                        incoming_cmd.target_node_id);
+
+                    alive_table[
+                        incoming_cmd.target_node_id
+                    ] = false;
                 }
-            } else {
-                ESP_LOGE(TAG, "Cannot send command. Node %d is DEAD/OFFLINE.", incoming_cmd.target_node_id);
+                else if (success == true)
+                {
+                    ESP_LOGI(
+                        TAG,
+                        "LoRa command successfully sent "
+                        "to Node %d",
+                        incoming_cmd.target_node_id);
+                }
+            }
+
+            /* =================================================
+             * Node is not alive
+             * ================================================= */
+
+            else
+            {
+                ESP_LOGE(
+                    TAG,
+                    "Cannot send command. "
+                    "Node %d is DEAD/OFFLINE.",
+                    incoming_cmd.target_node_id);
             }
         }
 
-        // 2. Background Maintenance: Discovery Broadcasts every 30 seconds
+        /* =====================================================
+         * 2. Background Discovery
+         * ===================================================== */
+
         seconds_since_discovery++;
-        if (seconds_since_discovery >= 30) {
-            ESP_LOGI(TAG, "Gateway: Sending Discovery Broadcast...");
+
+        if (seconds_since_discovery >= 30)
+        {
+            ESP_LOGI(
+                TAG,
+                "Gateway: Sending Discovery Broadcast...");
+
             uint8_t dummy = 0;
-            network_send(0xFF, PKT_TYPE_STATUS, &dummy, 1);
+
+            network_send(
+                0xFF,
+                PKT_TYPE_STATUS,
+                &dummy,
+                1);
+
             seconds_since_discovery = 0;
         }
+
     }
 }
+
 
 void app_main(void) {
     //Versioning
@@ -141,7 +208,7 @@ void app_main(void) {
     }
     
     // Initialize the IPC Queues
-    web_to_lora_queue = xQueueCreate(10, sizeof(gateway_cmd_t));
+    web_to_lora_queue = xQueueCreate(10, sizeof(lora_cmd_t));
     lora_to_web_queue = xQueueCreate(10, 256); // Holds strings up to 256 chars
 
     ESP_LOGI(TAG, "==========================================");

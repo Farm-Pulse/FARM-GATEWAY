@@ -1,135 +1,924 @@
-#include <string.h>
-#include <stdio.h>
-#include <stdlib.h>
 
 #include "mqtt.h"
 
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-
-#include "esp_wifi.h"
-#include "esp_event.h"
-#include "esp_log.h"
-#include "esp_netif.h"
-
-#include "mqtt_client.h"
-#include "farmpulse_defs.h"
-
-/* ===================== USER CONFIG ===================== */
-
-#define WIFI_SSID "Airtel_Ajay"
-#define WIFI_PASSWORD "Ajay@6952"
-
-#define MQTT_BROKER_URI "mqtts://a37f344630334685ad06ea955597f845.s1.eu.hivemq.cloud"
-
-#define MQTT_USERNAME "Prafull"
-#define MQTT_PASSWORD "Praful1234"
-#define MQTT_CLIENT_ID "gateway01"
-
-#define EXPECTED_PASSWORD "AB1234"
-#define EXPECTED_GID "MH-AMT-01"
-
-#define SUBSCRIBE_TOPIC "server/MH-AMT-01"
-
-char topic[100] = "gateway/MH-AMT-01";
-
-/* ======================================================= */
-
-extern bool get_next_lora_uplink_string(char *buffer);
-extern void push_downlink_command_to_lora(int node_id, int action_code);
-
 static const char *TAG = "MQTT_GATEWAY";
 
-static esp_mqtt_client_handle_t mqtt_client = NULL;
+esp_mqtt_client_handle_t mqtt_client = NULL;
 static bool mqtt_connected = false;
 static TaskHandle_t publish_task_handle = NULL;
 
-typedef struct
-{
-    char frame_version[5];
-    char password[10];
-    char gid[20];
-    int nid;
-    int function_code;
-    int action_code;
-    char data[200]; // GENERIC PAYLOAD
 
-} sensor_frame_t;
+
+// static void handle_fc10(const sensor_frame_t *frame)
+// {
+//     ESP_LOGI(TAG,
+//              "Node %d: FC 10 - LORA Configuration",
+//              frame->nid);
+
+//     /*
+//      * Pass the original FC and DATA
+//      * to the LoRa command handler.
+//      */
+//     push_downlink_command_to_lora(
+//     frame->nid,
+//     frame->function_code,
+//     frame->action_code,
+//     frame->data);
+// }
+
 
 bool validate_mqtt_frame(char *input, sensor_frame_t *frame)
 {
-    int len = strlen(input);
+    if (input == NULL || frame == NULL)
+    {
+        return false;
+    }
 
-    // 1. Check start and end delimiter
-    if (len < 5 || input[0] != '#' || input[len - 1] != '$')
+    size_t len = strlen(input);
+
+    /* 1. Check start and end delimiter */
+    if (len < 5 ||
+        input[0] != '#' ||
+        input[len - 1] != '$')
     {
         printf("Invalid frame format (# or $ missing)\n");
         return false;
     }
 
-    // 2. Copy to temp buffer (strtok modifies string)
+    /* Prevent temp buffer overflow */
+    if (len >= 300)
+    {
+        printf("MQTT frame too long\n");
+        return false;
+    }
+
+    /* 2. Copy into temporary buffer */
     char temp[300];
     strcpy(temp, input);
 
-    // Remove '#' and '$'
+    /* Remove leading '#' */
     memmove(temp, temp + 1, strlen(temp));
-    char *end = strchr(temp, '$');
-    if (end)
-        *end = '\0';
 
-    // 3. Extract tokens
+    /* Remove trailing '$' */
+    char *end = strrchr(temp, '$');
+
+    if (end != NULL)
+    {
+        *end = '\0';
+    }
+
+    /* Clear output structure */
+    memset(frame, 0, sizeof(sensor_frame_t));
+
+    /* 3. Extract tokens */
     char *token;
 
+    /* Frame Version */
     token = strtok(temp, " ");
-    if (!token)
-        return false;
-    strcpy(frame->frame_version, token);
 
+    if (token == NULL)
+    {
+        return false;
+    }
+
+    frame->frame_version = (uint8_t)atoi(token);
+
+
+    /* Password */
     token = strtok(NULL, " ");
-    if (!token)
-        return false;
-    strcpy(frame->password, token);
 
+    if (token == NULL)
+    {
+        return false;
+    }
+
+    strncpy(frame->password,
+            token,
+            sizeof(frame->password) - 1);
+
+    frame->password[sizeof(frame->password) - 1] = '\0';
+
+
+    /* GID */
     token = strtok(NULL, " ");
-    if (!token)
-        return false;
-    strcpy(frame->gid, token);
 
+    if (token == NULL)
+    {
+        return false;
+    }
+
+    strncpy(frame->gid,
+            token,
+            sizeof(frame->gid) - 1);
+
+    frame->gid[sizeof(frame->gid) - 1] = '\0';
+
+
+    /* Node ID */
     token = strtok(NULL, " ");
-    if (!token)
-        return false;
-    frame->nid = atoi(token);
 
+    if (token == NULL)
+    {
+        return false;
+    }
+
+    frame->nid = (uint8_t)atoi(token);
+
+
+    /* Function Code */
     token = strtok(NULL, " ");
-    if (!token)
-        return false;
-    frame->function_code = atoi(token);
 
+    if (token == NULL)
+    {
+        return false;
+    }
+
+    frame->function_code = (uint8_t)atoi(token);
+
+
+    /* Action Code */
     token = strtok(NULL, " ");
-    if (!token)
-        return false;
-    frame->action_code = atoi(token);
 
+    if (token == NULL)
+    {
+        return false;
+    }
+
+    frame->action_code = (uint8_t)atoi(token);
+
+
+    /* Data / remaining payload */
     token = strtok(NULL, "");
-    if (!token)
-        return false;
-    strcpy(frame->data, token);
 
-    // 4. Validate password
+    if (token != NULL)
+    {
+        strncpy((char *)frame->data,
+                token,
+                sizeof(frame->data) - 1);
+
+        frame->data[sizeof(frame->data) - 1] = '\0';
+    }
+
+
+    /* 4. Validate password */
     if (strcmp(frame->password, EXPECTED_PASSWORD) != 0)
     {
         printf("Invalid Password\n");
         return false;
     }
 
-    // 5. Validate GID
+
+    /* 5. Validate GID */
     if (strcmp(frame->gid, EXPECTED_GID) != 0)
     {
         printf("Invalid GID\n");
         return false;
     }
 
+
+    printf("Valid MQTT Frame\n");
+
     return true;
+}
+
+/* ===================== MQTT FRAME PARSER ===================== */
+int fnMQTT_frame_parser(sensor_frame_t *frame)
+{
+    // if (!validate_mqtt_frame(frame->data, frame))
+    // {
+    //     return ERROR;
+    // }
+    uint8_t sub_function_code = 0;
+    uint8_t data_len = strlen((char *)frame->data);
+    uint8_t mqtt_payload[200] = {0};
+    uint8_t status = ERROR;
+    // uint8_t *temp_ptr;
+
+    switch (frame->function_code)
+    {
+        case REBOOT:
+            {
+                ESP_LOGI(TAG,
+                         "Node %d: FC 0 - REBOOT Command",
+                         frame->nid);                                                                                                                                                                                                                                                                   
+            }
+            break;
+        case LORA_CONFIG_FRAME:
+            {
+                printf("in LORA_CONFIG_FRAME\n");
+                // handle_fc10(frame);
+
+                // Check if data length is sufficient to extract sub-function code
+                if (data_len >= 2)  // Assuming sub-function code is 1 byte and there's at least 1 byte of data
+                {
+                    
+                    sub_function_code = (uint8_t)atoi((char *)frame->data); // Assuming the first byte of data indicates the sub-function
+                    printf("sub_function_code=%d",sub_function_code);
+                }
+                else
+                {
+                    ESP_LOGW(TAG,
+                             "Node %d: FC 10 - LORA CONFIG Command - Insufficient data length for sub-function code",
+                             frame->nid);
+                    return ERROR;
+                }
+                
+                switch (sub_function_code)
+                {
+                    printf("After sub_function_code%d\n",frame->data[0]);
+                    case PARAM_LORA_MOTOR_CTRL:
+                    {
+                        // Note: This frame is only for LORA Nodes not for GATEWAY. The GATEWAY will only receive this frame from the LoRa Nodes.
+                        status = NO_ERROR;
+                        uint8_t msg_type = PKT_TYPE_CMD;
+                        ESP_LOGI(TAG,
+                                    "Node %d: FC 10 - [PARAM_LORA_MOTOR_CTRL]  Command - Sub-function 1",
+                                    frame->nid);
+                        if (frame->action_code == ACTION_SET)
+                        {
+                            ESP_LOGI(TAG,
+                                    "Node %d: FC 10 - LORA MOTOR CTRL SET Command",
+                                    frame->nid);
+                            if (frame->nid != GATEWAY_NODE_ID) 
+                            {
+                                ESP_LOGI(TAG,
+                                        "Node %d: FC 10 - LORA MOTOR CTRL SET Command - Valid Node ID",
+                                        frame->nid);
+                                int temp_sub_func = 0;
+                                int temp_motor_val = 0;
+                                uint8_t motor_status = 0;
+
+                                // #$ convert lora 
+                                //uint8_t motor_status = (uint8_t)atoi(strchr((char *)frame->data, ' ') + 1); // Assuming the second byte of data indicates the motor action
+                                // 1. Safely extract the motor status (No strchr needed)
+                                // If frame->data is "1", atoi safely returns 1. If it's garbage, it returns 0.
+
+                                // Parse both numbers: "1 0" -> sub_func = 1, motor_val = 0
+                                if (sscanf((char *)frame->data, "%d %d", &temp_sub_func, &temp_motor_val) == 2) {
+                                    motor_status = (temp_motor_val >= 1) ? 1 : 0;
+                                } else {
+                                    // Fallback if only a single digit was sent
+                                    motor_status = (uint8_t)atoi((char *)frame->data);
+                                    motor_status = (motor_status >= 1) ? 1 : 0;
+                                }
+
+                                ESP_LOGI(TAG, "Node %d: Parsed Motor SET Command -> State: %d (%s)", 
+                                        frame->nid, motor_status, motor_status ? "ON" : "OFF");
+                                
+                                uint8_t lora_payload[5] = {0};
+                                uint8_t index = 0;
+                                lora_payload[index++] = CMD_TYPE_CONFIG; //0x05
+                                lora_payload[index++] = _TYPE_SEND_CMD; //0x01
+                                lora_payload[index++] = ACTION_SET; //0x02
+                                lora_payload[index++] = PARAM_LORA_MOTOR_CTRL; //0x01
+                                lora_payload[index++] = motor_status; //0x01 / 0x00
+
+                                // 3. Push to the LoRa Task safely
+                                push_downlink_command_to_lora(frame->nid, PKT_TYPE_CMD, lora_payload, index);
+                            }
+                            else
+                            {
+                                ESP_LOGW(TAG,
+                                        "Node %d: FC 10 - LORA MOTOR CTRL SET Command - Invalid Node ID",
+                                        frame->nid);
+                                status = ERROR;
+
+                                memset(mqtt_payload, 0, sizeof(mqtt_payload));
+                                sprintf((char *)mqtt_payload, "#%d %s %s %d %d %d %d %d $",
+                                        frame->frame_version,
+                                        frame->password,
+                                        frame->gid,
+                                        frame->nid,
+                                        frame->function_code,
+                                        frame->action_code,
+                                        PARAM_LORA_MOTOR_CTRL,
+                                        status);
+                                int stat = esp_mqtt_client_publish(mqtt_client, PUBLISH_TOPIC, (char *) mqtt_payload, strlen((char *)mqtt_payload), 1, 0);        
+                                
+                                if (stat >= 0)
+                                {
+                                    ESP_LOGI(TAG, "[PARAM_LORA_MOTOR_CTRL] Published MQTT message: %s", mqtt_payload);
+                                }
+                                else
+                                {
+                                    ESP_LOGE(TAG, "[PARAM_LORA_MOTOR_CTRL] Failed to publish MQTT message: %s", mqtt_payload);
+                                }
+                            }
+                            
+                        }
+                        else if (frame->action_code == ACTION_GET)
+                        {
+                            ESP_LOGI(TAG,
+                                    "Node %d: FC 10 - LORA MOTOR CTRL GET Command",
+                                    frame->nid);
+                            if (frame->nid != GATEWAY_NODE_ID) 
+                            {
+                                ESP_LOGI(TAG,
+                                        "Node %d: FC 10 - LORA MOTOR CTRL GET Command - Valid Node ID",
+                                        frame->nid);
+
+                                // Convert to LoRa Frame 
+                                uint8_t lora_payload[5] = {0};
+                                uint8_t index = 0;
+                                lora_payload[index++] = CMD_TYPE_CONFIG;
+                                lora_payload[index++] = _TYPE_SEND_CMD;
+                                lora_payload[index++] = ACTION_GET;
+                                lora_payload[index++] = PARAM_LORA_MOTOR_CTRL;
+
+                                push_downlink_command_to_lora(
+                                frame->nid,
+                                msg_type,
+                                lora_payload,
+                                index);
+                            }
+                            else
+                            {
+                                ESP_LOGW(TAG,
+                                        "Node %d: FC 10 - LORA MOTOR CTRL GET Command - Invalid Node ID",
+                                        frame->nid);
+                                status = ERROR;
+                            
+                                memset(mqtt_payload, 0, sizeof(mqtt_payload));
+                                sprintf((char *)mqtt_payload, "#%d %s %s %d %d %d %d %d $",
+                                        frame->frame_version,
+                                        frame->password,
+                                        frame->gid,
+                                        frame->nid,
+                                        frame->function_code,
+                                        frame->action_code,
+                                        PARAM_LORA_MOTOR_CTRL,
+                                        status);
+                                int stat = esp_mqtt_client_publish(mqtt_client, PUBLISH_TOPIC, (char *)mqtt_payload, strlen((char *)mqtt_payload), 1, 0);        
+                                
+                                if (stat >= 0)
+                                {
+                                    ESP_LOGI(TAG, "[PARAM_LORA_MOTOR_CTRL] Published MQTT message: %s", mqtt_payload);
+                                }
+                                else
+                                {
+                                    ESP_LOGE(TAG, "[PARAM_LORA_MOTOR_CTRL] Failed to publish MQTT message: %s", mqtt_payload);
+                                }
+                            }
+                        }
+                        else
+                        {
+                            ESP_LOGW(TAG,
+                                    "Node %d: FC 10 - LORA MOTOR CTRL Unknown Action Code %d",
+                                    frame->nid,
+                                    frame->action_code);
+                            
+                            status = ERROR;
+                            memset(mqtt_payload, 0, sizeof(mqtt_payload));
+                            sprintf((char *)mqtt_payload, "#%d %s %s %d %d %d %d %d $",
+                                    frame->frame_version,
+                                    frame->password,
+                                    frame->gid,
+                                    frame->nid,
+                                    frame->function_code,
+                                    frame->action_code,
+                                    PARAM_LORA_MOTOR_CTRL,
+                                    status);
+                            int stat = esp_mqtt_client_publish(mqtt_client, PUBLISH_TOPIC, (char *)mqtt_payload, strlen((char *)mqtt_payload), 1, 0);        
+                            
+                            
+                            if (stat >= 0)
+                            {
+                                ESP_LOGI(TAG, "[PARAM_LORA_MOTOR_CTRL] Published MQTT message: %s", mqtt_payload);
+                            }
+                            else
+                            {
+                                ESP_LOGE(TAG, "[PARAM_LORA_MOTOR_CTRL] Failed to publish MQTT message: %s", mqtt_payload);
+                            }
+                            // build_mqtt_frame(&ack_frame, mqtt_payload);
+                        }
+                        return status;
+                    }
+                    break;
+                    case PARAM_LORA_CONFIG:
+                    {
+                        ESP_LOGI(TAG,
+                                    "Node %d: FC 10 - [PARAM_LORA_CONFIG]  Command - Sub-function 2",
+                                    frame->nid);
+                        
+                        if (frame->action_code == ACTION_SET)
+                        {
+                            ESP_LOGI(TAG,
+                                    "Node %d: FC 10 - LORA CONFIG SET Command",
+                                    frame->nid);
+                        
+                        }
+                        else if (frame->action_code == ACTION_GET)
+                        {
+                            ESP_LOGI(TAG,
+                                    "Node %d: FC 10 - LORA CONFIG GET Command",
+                                    frame->nid);
+                        }
+                        else
+                        {
+                            ESP_LOGW(TAG,
+                                    "Node %d: FC 10 - LORA CONFIG Unknown Action Code %d",
+                                    frame->nid,
+                                    frame->action_code);
+                        }
+                    }
+                    break;
+                    case PARAM_LORA_TX_PWR_CONFIG:
+                    {
+                        ESP_LOGI(TAG,
+                                    "Node %d: FC 10 - [PARAM_LORA_TX_PWR_CONFIG]  Command - Sub-function 3",
+                                    frame->nid);
+                        if (frame->action_code == ACTION_SET)
+                        {
+                            ESP_LOGI(TAG,
+                                    "Node %d: FC 10 - LORA TX PWR CONFIG SET Command",
+                                    frame->nid);
+                        
+                        }
+                        else if (frame->action_code == ACTION_GET)
+                        {
+                            ESP_LOGI(TAG,
+                                    "Node %d: FC 10 - LORA TX PWR CONFIG GET Command",
+                                    frame->nid);
+                        }
+                        else
+                        {
+                            ESP_LOGW(TAG,
+                                    "Node %d: FC 10 - LORA TX PWR CONFIG Unknown Action Code %d",
+                                    frame->nid,
+                                    frame->action_code);
+                        }
+                    }
+                    break;
+                    case PARAM_FV:
+                    {
+                        ESP_LOGI(TAG,
+                                    "Node %d: FC 10 - [PARAM_FV]  Command - Sub-function 4",
+                                    frame->nid);
+
+                        if (frame->action_code == ACTION_GET)
+                        {
+                            ESP_LOGI(TAG,
+                                    "Node %d: FC 10 - LORA FRAME VERSION GET Command",
+                                    frame->nid);
+                        }
+                        else
+                        {
+                            ESP_LOGW(TAG,
+                                    "Node %d: FC 10 - LORA FRAME VERSION Unknown Action Code %d",
+                                    frame->nid,
+                                    frame->action_code);
+                        }
+                    }
+                    break;
+                    case PARAM_SENSOR_DATA:
+                    {
+                        ESP_LOGI(TAG,
+                                    "Node %d: FC 10 - [PARAM_SENSOR_DATA]  Command - Sub-function 5",
+                                    frame->nid);
+                        if (frame->action_code == ACTION_SET)
+                        {
+                            ESP_LOGI(TAG,
+                                    "Node %d: FC 10 - LORA TX PWR CONFIG SET Command",
+                                    frame->nid);
+                        
+                        }
+                        else if (frame->action_code == ACTION_GET)
+                        {
+                            ESP_LOGI(TAG,
+                                    "Node %d: FC 10 - LORA TX PWR CONFIG GET Command",
+                                    frame->nid);
+                        }
+                        else
+                        {
+                            ESP_LOGW(TAG,
+                                    "Node %d: FC 10 - LORA TX PWR CONFIG Unknown Action Code %d",
+                                    frame->nid,
+                                    frame->action_code);
+                        }
+                    }
+                    break;
+                    case PARAM_LORA_PANEL_STATUS:
+                    {
+                        uint8_t msg_type = PKT_TYPE_CMD;
+                        ESP_LOGI(TAG,
+                                    "Node %d: FC 10 - [PARAM_LORA_PANEL_STATUS] Command - Sub-function 6",
+                                    frame->nid);
+
+                        if (frame->action_code == ACTION_GET)
+                        {
+                            ESP_LOGI(TAG,
+                                    "Node %d: FC 10 - LORA PANEL STATUS GET Command",
+                                    frame->nid);
+                            if (frame->nid != GATEWAY_NODE_ID) 
+                            {
+                                ESP_LOGI(TAG,
+                                        "Node %d: FC 10 - LORA MOTOR CTRL GET Command - Valid Node ID",
+                                        frame->nid);
+
+                                // Convert to LoRa Frame 
+                                uint8_t lora_payload[5] = {0};
+                                uint8_t index = 0;
+                                lora_payload[index++] = CMD_TYPE_CONFIG;
+                                lora_payload[index++] = _TYPE_SEND_CMD;
+                                lora_payload[index++] = ACTION_GET;
+                                lora_payload[index++] = PARAM_LORA_PANEL_STATUS;
+
+                                push_downlink_command_to_lora(
+                                frame->nid,
+                                msg_type,
+                                lora_payload,
+                                index);
+                            }
+                            else
+                            {
+                                ESP_LOGW(TAG,
+                                        "Node %d: FC 10 - LORA PANEL STATUS GET Command - Invalid Node ID",
+                                        frame->nid);
+                                status = ERROR;
+                            
+                                memset(mqtt_payload, 0, sizeof(mqtt_payload));
+                                sprintf((char *)mqtt_payload, "#%d %s %s %d %d %d %d %d $",
+                                        frame->frame_version,
+                                        frame->password,
+                                        frame->gid,
+                                        frame->nid,
+                                        frame->function_code,
+                                        frame->action_code,
+                                        PARAM_LORA_PANEL_STATUS,
+                                        status);
+                                int stat = esp_mqtt_client_publish(mqtt_client, PUBLISH_TOPIC, (char *)mqtt_payload, strlen((char *)mqtt_payload), 1, 0);        
+                                
+                                if (stat >= 0)
+                                {
+                                    ESP_LOGI(TAG, "[PARAM_LORA_MOTOR_CTRL] Published MQTT message: %s", mqtt_payload);
+                                }
+                                else
+                                {
+                                    ESP_LOGE(TAG, "[PARAM_LORA_MOTOR_CTRL] Failed to publish MQTT message: %s", mqtt_payload);
+                                }
+                            }
+                        }
+                        else
+                        {
+                            ESP_LOGW(TAG,
+                                    "Node %d: FC 10 - LORA PANEL STATUS Unknown Action Code %d",
+                                    frame->nid,
+                                    frame->action_code);
+                            status = ERROR;
+                            
+                            memset(mqtt_payload, 0, sizeof(mqtt_payload));
+                            sprintf((char *)mqtt_payload, "#%d %s %s %d %d %d %d %d $",
+                                    frame->frame_version,
+                                    frame->password,
+                                    frame->gid,
+                                    frame->nid,
+                                    frame->function_code,
+                                    frame->action_code,
+                                    PARAM_LORA_PANEL_STATUS,
+                                    status);
+                            int stat = esp_mqtt_client_publish(mqtt_client, PUBLISH_TOPIC, (char *)mqtt_payload, strlen((char *)mqtt_payload), 1, 0);        
+                            
+                            if (stat >= 0)
+                            {
+                                ESP_LOGI(TAG, "[PARAM_LORA_MOTOR_CTRL] Published MQTT message: %s", mqtt_payload);
+                            }
+                            else
+                            {
+                                ESP_LOGE(TAG, "[PARAM_LORA_MOTOR_CTRL] Failed to publish MQTT message: %s", mqtt_payload);
+                            }
+                        }
+                        
+                        return status;
+                    }
+                    break;
+                    case PARAM_LORA_UUID:
+                    {
+                        ESP_LOGI(TAG,
+                                    "Node %d: FC 10 - [PARAM_LORA_UUID] Command - Sub-function 7",
+                                    frame->nid);
+                        if (frame->action_code == ACTION_SET)
+                        {
+                            ESP_LOGI(TAG,
+                                    "Node %d: FC 10 - LORA UUID SET Command",
+                                    frame->nid);
+                        
+                        }
+                        else if (frame->action_code == ACTION_GET)
+                        {
+                            ESP_LOGI(TAG,
+                                    "Node %d: FC 10 - LORA UUID GET Command",
+                                    frame->nid);
+                        }
+                        else
+                        {
+                            ESP_LOGW(TAG,
+                                    "Node %d: FC 10 - LORA UUID Unknown Action Code %d",
+                                    frame->nid,
+                                    frame->action_code);
+                        }
+                    }
+                    break;
+                    case PARAM_ALARM_MASK:
+                    {
+                        ESP_LOGI(TAG,
+                                    "Node %d: FC 10 - [PARAM_ALARM_MASK] Command - Sub-function 8",
+                                    frame->nid);
+                        if (frame->action_code == ACTION_SET)
+                        {
+                            ESP_LOGI(TAG,
+                                    "Node %d: FC 10 - [PARAM_ALARM_MASK] SET Command",
+                                    frame->nid);
+                        
+                        }
+                        else if (frame->action_code == ACTION_GET)
+                        {
+                            ESP_LOGI(TAG,
+                                    "Node %d: FC 10 - [PARAM_ALARM_MASK] GET Command",
+                                    frame->nid);
+                        }
+                        else
+                        {
+                            ESP_LOGW(TAG,
+                                    "Node %d: FC 10 - [PARAM_ALARM_MASK] Unknown Action Code %d",
+                                    frame->nid,
+                                    frame->action_code);
+                        }
+                    }
+                    break;
+                    case PARAM_SIGNATURE:
+                    {
+                        ESP_LOGI(TAG,
+                                    "Node %d: FC 10 - [PARAM_SIGNATURE] Command - Sub-function 9",
+                                    frame->nid);
+                        if (frame->action_code == ACTION_SET)
+                        {
+                            ESP_LOGI(TAG,
+                                    "Node %d: FC 10 - [PARAM_SIGNATURE] SET Command",
+                                    frame->nid);
+                        
+                        }
+                        else if (frame->action_code == ACTION_GET)
+                        {
+                            ESP_LOGI(TAG,
+                                    "Node %d: FC 10 - [PARAM_SIGNATURE] GET Command",
+                                    frame->nid);
+                        }
+                        else
+                        {
+                            ESP_LOGW(TAG,
+                                    "Node %d: FC 10 - [PARAM_SIGNATURE] Unknown Action Code %d",
+                                    frame->nid,
+                                    frame->action_code);
+                        }
+                    }
+                    break;
+                    case PARAM_DEVICE_ID:
+                    {
+                        ESP_LOGI(TAG,
+                                    "Node %d: FC 10 - [PARAM_DEVICE_ID] Command - Sub-function 10",
+                                    frame->nid);
+                        if (frame->action_code == ACTION_SET)
+                        {
+                            ESP_LOGI(TAG,
+                                    "Node %d: FC 10 - [PARAM_DEVICE_ID] SET Command",
+                                    frame->nid);
+                        
+                        }
+                        else if (frame->action_code == ACTION_GET)
+                        {
+                            ESP_LOGI(TAG,
+                                    "Node %d: FC 10 - [PARAM_DEVICE_ID] GET Command",
+                                    frame->nid);
+                        }
+                        else
+                        {
+                            ESP_LOGW(TAG,
+                                    "Node %d: FC 10 - [PARAM_DEVICE_ID] Unknown Action Code %d",
+                                    frame->nid,
+                                    frame->action_code);
+                        }
+                    }
+                    break;
+                    case PARAM_RSSI_THRESH:
+                    {
+                        ESP_LOGI(TAG,
+                                    "Node %d: FC 10 - [PARAM_RSSI_THRESH] Command - Sub-function 11",
+                                    frame->nid);
+                        if (frame->action_code == ACTION_SET)
+                        {
+                            ESP_LOGI(TAG,
+                                    "Node %d: FC 10 - [PARAM_RSSI_THRESH] SET Command",
+                                    frame->nid);
+                        
+                        }
+                        else if (frame->action_code == ACTION_GET)
+                        {
+                            ESP_LOGI(TAG,
+                                    "Node %d: FC 10 - [PARAM_RSSI_THRESH] GET Command",
+                                    frame->nid);
+                        }
+                        else
+                        {
+                            ESP_LOGW(TAG,
+                                    "Node %d: FC 10 - [PARAM_RSSI_THRESH] Unknown Action Code %d",
+                                    frame->nid,
+                                    frame->action_code);
+                        }
+                    }
+                    break;
+                    case PARAM_HB_INTERVAL:
+                    {
+                        ESP_LOGI(TAG,
+                                    "Node %d: FC 10 - [PARAM_HB_INTERVAL] Command - Sub-function 12",
+                                    frame->nid);
+                        if (frame->action_code == ACTION_SET)
+                        {
+                            ESP_LOGI(TAG,
+                                    "Node %d: FC 10 - [PARAM_HB_INTERVAL] SET Command",
+                                    frame->nid);
+                        
+                        }
+                        else if (frame->action_code == ACTION_GET)
+                        {
+                            ESP_LOGI(TAG,
+                                    "Node %d: FC 10 - [PARAM_HB_INTERVAL] GET Command",
+                                    frame->nid);
+                        }
+                        else
+                        {
+                            ESP_LOGW(TAG,
+                                    "Node %d: FC 10 - [PARAM_HB_INTERVAL] Unknown Action Code %d",
+                                    frame->nid,
+                                    frame->action_code);
+                        }
+                    }
+                    break;
+                    case PARAM_METER_DATA_REQ:
+                    {
+                        ESP_LOGI(TAG,
+                                    "Node %d: FC 10 - [PARAM_METER_DATA_REQ] Command - Sub-function 13",
+                                    frame->nid);
+                        if (frame->action_code == ACTION_SET)
+                        {
+                            ESP_LOGI(TAG,
+                                    "Node %d: FC 10 - [PARAM_METER_DATA_REQ] SET Command",
+                                    frame->nid);
+                        
+                        }
+                        else if (frame->action_code == ACTION_GET)
+                        {
+                            ESP_LOGI(TAG,
+                                    "Node %d: FC 10 - [PARAM_METER_DATA_REQ] GET Command",
+                                    frame->nid);
+                        }
+                        else
+                        {
+                            ESP_LOGW(TAG,
+                                    "Node %d: FC 10 - [PARAM_METER_DATA_REQ] Unknown Action Code %d",
+                                    frame->nid,
+                                    frame->action_code);
+                        }
+                    }
+                    break;
+                    case PARAM_REBOOT:
+                    {
+                        ESP_LOGI(TAG,
+                                    "Node %d: FC 10 - [PARAM_REBOOT] Command - Sub-function 14",
+                                    frame->nid);
+                        if (frame->action_code == ACTION_SET)
+                        {
+                            ESP_LOGI(TAG,
+                                    "Node %d: FC 10 - [PARAM_REBOOT] SET Command",
+                                    frame->nid);
+                        
+                        }
+                        else if (frame->action_code == ACTION_GET)
+                        {
+                            ESP_LOGI(TAG,
+                                    "Node %d: FC 10 - [PARAM_REBOOT] GET Command",
+                                    frame->nid);
+                        }
+                        else
+                        {
+                            ESP_LOGW(TAG,
+                                    "Node %d: FC 10 - [PARAM_REBOOT] Unknown Action Code %d",
+                                    frame->nid,
+                                    frame->action_code);
+                        }
+                    }
+                    break;
+                    default:
+                    {
+
+                        ESP_LOGW(TAG,
+                            "Node %d: FC 10 - [LORA_CONFIG_FRAME] - Unknown Sub-function %d",
+                            frame->nid,
+                            sub_function_code);
+                    }
+                    break;
+                }
+            }
+            break;
+        case HANDSHAKE_FRAME:
+            {
+                ESP_LOGI(TAG,
+                         "Node %d: FC 1 - HANDSHAKE Command",
+                         frame->nid);
+            }
+            break;
+        case GATEWAY_CONFIG:
+            {
+                ESP_LOGI(TAG,
+                         "Node %d: FC 2 - GATEWAY CONFIG Command",
+                         frame->nid);
+            }
+            break;
+        case NODE_THRESHOLD_CONFIG:
+            {
+               ESP_LOGI(TAG,
+                         "Node %d: FC 3 - NODE THRESHOLD CONFIG Command",
+                         frame->nid);
+            }
+            break;
+        case NODE_COUNT_CONFIG:
+            {
+                ESP_LOGI(TAG,
+                         "Node %d: FC 4 - NODE COUNT CONFIG Command",
+                         frame->nid);
+            }
+            break;
+        case NODE_PERIODIC_INTERVAL:
+            {
+                ESP_LOGI(TAG,
+                         "Node %d: FC 5 - NODE PERIODIC INTERVAL Command",
+                         frame->nid);
+            }
+            break;
+        case GATEWAY_PANEL_STATUS:
+            {
+                ESP_LOGI(TAG,
+                         "Node %d: FC 6 - GATEWAY PANEL STATUS Command",
+                         frame->nid);
+            }
+            break;
+        case NODE_PERIODIC_MESSAGE:
+            {
+                ESP_LOGI(TAG,
+                         "Node %d: FC 7 - NODE PERIODIC MESSAGE Command",
+                         frame->nid);
+            }
+            break;
+        case NETWORK_CONFIG:
+            {
+                ESP_LOGI(TAG,
+                         "Node %d: FC 11 - NETWORK CONFIG Command",
+                         frame->nid);
+            }
+            break;
+        case APN_CONFIG:
+            {
+               ESP_LOGI(TAG,
+                         "Node %d: FC 12 - APN CONFIG Command",
+                         frame->nid);
+            }
+            break;
+        case GATEWAY_FIRMWARE_VERSION:
+            {
+                ESP_LOGI(TAG,
+                         "Node %d: FC 13 - GATEWAY FIRMWARE VERSION Command",
+                         frame->nid);
+            }
+            break;
+        case SIM_INFORMATION:
+            {
+                ESP_LOGI(TAG,
+                         "Node %d: FC 14 - SIM INFORMATION Command",
+                         frame->nid);
+            }
+            break;
+        case OTA_FRAME:
+            {
+               ESP_LOGI(TAG,
+                         "Node %d: FC 9 - OTA Command",
+                         frame->nid);
+            }
+            break;
+        case ALARM_FRAME:
+            {
+                ESP_LOGI(TAG,
+                         "Node %d: FC 8 - ALARM Command",
+                         frame->nid);
+            }
+            break;
+        default:
+            ESP_LOGW(TAG,
+                    "Node %d: Unknown Function Code %d",
+                    frame->nid,
+                    frame->function_code);
+            break;
+    }
+
+    return NO_ERROR;
 }
 
 /* ===================== SIMULATE LORA DATA ===================== */
@@ -172,7 +961,7 @@ void parse_lora_frame(char *input, sensor_frame_t *frame)
 
     token = strtok(temp, " ");
     if (token)
-        strcpy(frame->frame_version, token);
+        frame->frame_version = (uint8_t)atoi(token);
 
     token = strtok(NULL, " ");
     if (token)
@@ -194,9 +983,15 @@ void parse_lora_frame(char *input, sensor_frame_t *frame)
     if (token)
         frame->action_code = atoi(token);
 
-    token = strtok(NULL, " ");
+    token = strtok(NULL, "");
     if (token)
-        strcpy(frame->data, token);
+    {
+        // strcpy((char *)frame->data, token);
+        strncpy((char *)frame->data,
+        token,
+        sizeof(frame->data) - 1);
+        frame->data[sizeof(frame->data) - 1] = '\0';
+    }
 }
 
 /* ===================== BUILD MQTT FRAME ===================== */
@@ -204,7 +999,7 @@ void parse_lora_frame(char *input, sensor_frame_t *frame)
 void build_mqtt_frame(sensor_frame_t *frame, char *payload)
 {
     sprintf(payload,
-            "#%s %s %s %d %d %d %s $",
+            "#%d %s %s %d %d %d %s $",
             frame->frame_version,
             frame->password,
             frame->gid,
@@ -216,6 +1011,52 @@ void build_mqtt_frame(sensor_frame_t *frame, char *payload)
 
 /* ===================== MQTT PUBLISH TASK ===================== */
 
+// static void mqtt_publish_task(void *arg)
+// {
+//     while (1)
+//     {
+//         if (mqtt_connected && mqtt_client)
+//         {
+//             char lora_data[200];
+//             // printf("before LoRa data praful...\n");
+//             /* Simulate LoRa packet */
+//             // simulate_lora_receive(lora_data);
+//             // printf("Simulated LoRa Data: %s\n", lora_data);
+//             // ESP_LOGI(TAG,"LoRa RX: %s",lora_data);
+//             if (get_next_lora_uplink_string(lora_data))
+//             {
+//                 printf("Received LoRa Data: %s\n", lora_data);
+//                 ESP_LOGI(TAG, "Received LoRa Data: %s", lora_data);
+//                 sensor_frame_t frame;
+
+//                 parse_lora_frame(lora_data, &frame);
+
+//                 char mqtt_payload[200];
+
+//                 build_mqtt_frame(&frame, mqtt_payload);
+
+//                 char topic[100];
+
+//                 sprintf(topic,"gateway/MH-AMT-01"); // frame.gid
+
+//                 // int msg_id = esp_mqtt_client_publish( mqtt_client, topic, mqtt_payload, 0,1, 0);
+                
+//                 // ESP_LOGI(TAG, "MQTT Topic: %s", topic);
+//                 // ESP_LOGI(TAG, "MQTT Payload: %s", mqtt_payload);
+//                 // ESP_LOGI(TAG, "msg_id=%d", msg_id);
+                 
+//                 // if (frame.function_code == 10) {
+//                 //     char ack_payload[200];
+//                 //     sprintf(ack_payload, "#1 AB1234 MH-AMT-XX 1 10 3 1 0 $");
+//                 //     esp_mqtt_client_publish(mqtt_client, topic, ack_payload, 0, 1, 0);
+//                 // }
+//             }
+//         }
+//         else
+//         vTaskDelay(pdMS_TO_TICKS(5000)); // Only delay if Wi-Fi/MQTT is disconnected so we don't spam CPU
+//     }
+// }
+
 static void mqtt_publish_task(void *arg)
 {
     while (1)
@@ -223,191 +1064,229 @@ static void mqtt_publish_task(void *arg)
         if (mqtt_connected && mqtt_client)
         {
             char lora_data[200];
-
-            /* Simulate LoRa packet */
-            // simulate_lora_receive(lora_data);
-
-            // ESP_LOGI(TAG,"LoRa RX: %s",lora_data);
+            
+            // 1. Wait for the perfectly formatted string from main.c
             if (get_next_lora_uplink_string(lora_data))
             {
-                sensor_frame_t frame;
-
-                parse_lora_frame(lora_data, &frame);
-
-                char mqtt_payload[200];
-
-                build_mqtt_frame(&frame, mqtt_payload);
-
-                char topic[100];
-
-                sprintf(topic,
-                        "gateway/MH-AMT-01"); // frame.gid
-
-                int msg_id = esp_mqtt_client_publish(
-                    mqtt_client,
-                    topic,
-                    mqtt_payload,
-                    0,
-                    1,
-                    0);
-
-                ESP_LOGI(TAG, "MQTT Topic: %s", topic);
-                ESP_LOGI(TAG, "MQTT Payload: %s", mqtt_payload);
-                ESP_LOGI(TAG, "msg_id=%d", msg_id);
+                ESP_LOGI(TAG, "Pulled from Queue: %s", lora_data);
                 
-                if (frame.function_code == 10) {
-                    char ack_payload[200];
-                    sprintf(ack_payload, "#1 AB1234 MH-AMT-XX 1 10 3 1 0 $");
-                    esp_mqtt_client_publish(mqtt_client, topic, ack_payload, 0, 1, 0);
+                char topic[100];
+                sprintf(topic, "gateway/MH-AMT-01");
+
+                // 2. DIRECT PUBLISH: Skip parse_lora_frame and build_mqtt_frame entirely!
+                int msg_id = esp_mqtt_client_publish(mqtt_client, topic, lora_data, 0, 1, 0);
+                
+                if (msg_id >= 0) {
+                    ESP_LOGI(TAG, "Successfully published to HiveMQ (msg_id=%d)", msg_id);
+                } else {
+                    ESP_LOGE(TAG, "Failed to publish to HiveMQ");
                 }
             }
         }
         else
-        vTaskDelay(pdMS_TO_TICKS(5000)); // Only delay if Wi-Fi/MQTT is disconnected so we don't spam CPU
+        {
+            // Only delay if disconnected to prevent CPU spam
+            vTaskDelay(pdMS_TO_TICKS(5000));
+        }
     }
 }
 
 /* ===================== MQTT EVENT HANDLER ===================== */
 
-static void mqtt_event_handler(void *arg,
-                               esp_event_base_t event_base,
-                               int32_t event_id,
-                               void *event_data)
+static void mqtt_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
 {
     esp_mqtt_event_handle_t event = event_data;
 
     switch (event_id)
     {
+        case MQTT_EVENT_CONNECTED:
+        {    
+                ESP_LOGI(TAG, "MQTT CONNECTED");
 
-    case MQTT_EVENT_CONNECTED:
+                mqtt_connected = true;
+                mqtt_client = event->client;
 
-        ESP_LOGI(TAG, "MQTT CONNECTED");
+                esp_mqtt_client_subscribe(
+                    mqtt_client,
+                    SUBSCRIBE_TOPIC,
+                    1);
 
-        mqtt_connected = true;
-        mqtt_client = event->client;
-
-        esp_mqtt_client_subscribe(
-            mqtt_client,
-            SUBSCRIBE_TOPIC,
-            1);
-
-        // ONLY create the task if it doesn't already exist
-    if (publish_task_handle == NULL) {
-        xTaskCreate(
-            mqtt_publish_task,
-            "mqtt_publish",
-            4096,
-            NULL,
-            5,
-            &publish_task_handle); // Save the handle
-    }
-        break;
-
-    case MQTT_EVENT_DATA:
-    {
-        ESP_LOGI(TAG, "MQTT DATA RECEIVED");
-
-        char rx_data[300];
-
-        // Copy payload safely
-        snprintf(rx_data, sizeof(rx_data), "%.*s",
-                 event->data_len,
-                 event->data);
-
-        printf("Received: %s\n", rx_data);
-
-        sensor_frame_t frame;
-
-        if (validate_mqtt_frame(rx_data, &frame))
-        {
-            ESP_LOGI(TAG, "Frame VALID");
-
-            printf("Version: %s\n", frame.frame_version);
-            printf("GID: %s\n", frame.gid);
-            printf("Data: %s\n", frame.data);
-            if (frame.nid == 0)
-            {
-                printf("Node ID: Broadcast\n");
+                // ONLY create the task if it doesn't already exist
+            if (publish_task_handle == NULL) {
+                BaseType_t ret = xTaskCreate(
+                    mqtt_publish_task,
+                    "mqtt_publish",
+                    4096,
+                    NULL,
+                    5,
+                    &publish_task_handle); // Save the handle
+                    ESP_LOGI(TAG, "xTaskCreate returned %d", ret);
             }
-            else if (frame.nid >= 1 && frame.nid <= 255)
+        }
+            break;
+
+        case MQTT_EVENT_DATA:
+        {
+            ESP_LOGI(TAG, "MQTT DATA RECEIVED");
+
+            char rx_data[300];
+
+            // Copy payload safely
+            snprintf(rx_data, sizeof(rx_data), "%.*s",
+                    event->data_len,
+                    event->data);
+
+            printf("Received: %s\n", rx_data);
+
+            sensor_frame_t frame;
+
+            if (validate_mqtt_frame(rx_data, &frame))
             {
-                printf("Node ID: %d\n", frame.nid);
+                ESP_LOGI(TAG, "Frame VALID");
+                printf("Version: %d\n", frame.frame_version);
+                printf("GID: %s\n", frame.gid);
+                printf("Data: %s\n", frame.data);
 
-                // --- NEW: STRICT PROTOCOL PARSING ---
-                int sub_function = -1;
-                int motor_action = -1;
-
-                // Parse the string "1 0" into two distinct integers
-                if (sscanf(frame.data, "%d %d", &sub_function, &motor_action) == 2)
+                if (fnMQTT_frame_parser(&frame) == NO_ERROR)
                 {
-
-                    // Check if DA-[A] is 1 (Motor Operation)
-                    if (sub_function == 1)
-                    {
-                        uint8_t lora_cmd = CMD_MOTOR_OFF; // Default to safe OFF
-
-                        // Check DA-[B] for ON or OFF
-                        if (motor_action == 1)
-                        {
-                            lora_cmd = CMD_MOTOR_ON;
-                            ESP_LOGW(TAG, "Parsed Web Command: MOTOR ON -> Pushing to LoRa");
-                        }
-                        else if (motor_action == 0)
-                        {
-                            lora_cmd = CMD_MOTOR_OFF;
-                            ESP_LOGW(TAG, "Parsed Web Command: MOTOR OFF -> Pushing to LoRa");
-                        }
-
-                        // Push the correctly translated command to your LoRa Queue
-                        push_downlink_command_to_lora(frame.nid, lora_cmd);
-                    }
-                    else
-                    {
-                        ESP_LOGW(TAG, "Ignored: Unsupported Sub-Function Code [%d]", sub_function);
-                    }
+                    ESP_LOGI(TAG, "Frame Processed Successfully");
                 }
                 else
                 {
-                    ESP_LOGE(TAG, "Failed to parse data string: '%s'", frame.data);
-                }
-                // ------------------------------------
-
-                // Send ACK back to the Cloud
-                if (frame.function_code == 10)
-                {
-                    char ack_payload[200];
-                    sprintf(ack_payload, "#1 AB1234 MH-AMT-XX 1 10 3 1 0 $");
-
-                    int msg_id = esp_mqtt_client_publish(
-                        mqtt_client,
-                        topic,
-                        ack_payload,
-                        0, 1, 0);
+                    ESP_LOGE(TAG, "Frame Processing Failed");
                 }
             }
             else
             {
-                printf("invalid node id\n");
+                ESP_LOGE(TAG, "Frame INVALID - Ignored");
             }
+
+
+                // if (frame.nid == 0)
+                // {
+                //     /*
+                //     * Only Gateway functions are allowed here.
+                //     */
+
+                //     switch (frame.function_code)
+                //     {
+                //         case 0:
+                //             /* Gateway Reboot */
+                //             break;
+
+                //         case 1:
+                //             /* Handshake */
+                //             break;
+
+                //         case 2:
+                //             /* Gateway Configuration */
+                //             break;
+
+                //         case 4:
+                //             /* Number of Nodes */
+                //             break;
+
+                //         case 5:
+                //             /* Periodic Interval */
+                //             break;
+
+                //         case 6:
+                //             /* Gateway Panel Status */
+                //             break;
+
+                //         case 9:
+                //             /* Gateway OTA */
+                //             break;
+
+                //         case 11:
+                //             /* MQTT Network Configuration */
+                //             break;
+
+                //         case 12:
+                //             /* APN */
+                //             break;
+
+                //         case 13:
+                //             /* Gateway Firmware */
+                //             break;
+
+                //         case 14:
+                //             /* SIM Information */
+                //             break;
+
+                //         default:
+                //             ESP_LOGE(TAG,"Invalid Gateway Function Code: %d",frame.function_code);
+                //             // mqtt_send_nack(&frame, "Invalid Gateway Function Code");
+                //             break;
+                //     }
+                // }
+                // else if (frame.nid >= 1 && frame.nid <= 255)
+                // {
+                //     ESP_LOGI(TAG, "Valid Node ID: %d", frame.nid);
+
+                //     switch (frame.function_code)
+                //     {
+                //         case 10:
+                //             handle_fc10(&frame);
+                //             break;
+
+                //         // case 0:
+                //         //     handle_node_reboot(&frame);
+                //         //     break;
+
+                //         // case 3:
+                //         //     handle_node_threshold(&frame);
+                //         //     break;
+
+                //         // case 7:
+                //         //     handle_node_periodic(&frame);
+                //         //     break;
+
+                //         // case 8:
+                //         //     handle_node_alarm(&frame);
+                //         //     break;
+
+                //         // case 9:
+                //         //     handle_node_ota(&frame);
+                //         //     break;
+
+                //         default:
+                //             ESP_LOGW(TAG,"Unsupported Node Function Code: %d", frame.function_code);
+                //             break;
+                //     }
+                // }
+                // else
+                // {
+                //     ESP_LOGE(TAG, "Invalid Node ID: %d", frame.nid);
+                // }
+            
+            
+            // }
+            // else
+            // {
+            //     ESP_LOGE(TAG, "Frame INVALID - Ignored");
+
+            // }
+
+            break;
         }
-        else
+
+        case MQTT_EVENT_DISCONNECTED:
         {
-            ESP_LOGE(TAG, "Frame INVALID - Ignored");
+
+            
+            ESP_LOGW(TAG, "MQTT DISCONNECTED");
+            
+            mqtt_connected = false;
+            
+            break;
         }
 
-        break;
-    }
+        default:
+        {
 
-    case MQTT_EVENT_DISCONNECTED:
-
-        ESP_LOGW(TAG, "MQTT DISCONNECTED");
-
-        mqtt_connected = false;
-
-        break;
-
-    default:
-        break;
+            break;
+        }
     }
 }
 
@@ -458,9 +1337,9 @@ static void mqtt_start(void)
             .credentials.client_id = MQTT_CLIENT_ID,
             .broker.verification.certificate = root_ca_pem,
         };
-
+    
     ESP_LOGI(TAG, "Initializing MQTT Client...");
-
+    
     mqtt_client = esp_mqtt_client_init(&mqtt_cfg);
 
     if (mqtt_client != NULL)
